@@ -1,0 +1,833 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Measurement App – Map + Calibration + Export</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="anonymous"/>
+  <style>
+    :root{
+      --bg:#0f1115; --panel:#151823; --ink:#e6e8ef; --muted:#9aa3b2; --accent:#7aa2ff; --warn:#ff7a7a;
+      --c1:#60a5fa; --c2:#34d399; --c3:#f97316; --c4:#e879f9; --c5:#f43f5e;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial}
+    .app{display:grid;grid-template-columns: 360px 1fr;grid-template-rows:auto 1fr;gap:8px;height:100%;padding:10px}
+    header{grid-column:1/-1;background:var(--panel);border:1px solid #1f2433;border-radius:10px;padding:8px}
+    .toolbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+    .toolbar .group{display:flex;gap:6px;align-items:center;padding-right:8px;border-right:1px solid #23283a;margin-right:8px}
+    button, select, input[type="file"], input[type="number"], input[type="text"]{background:#111522;color:var(--ink);border:1px solid #242a3d;border-radius:8px;padding:6px 10px}
+    button.toggle.active{outline:2px solid var(--accent);background:#0d1732}
+    button.warn{border-color:#3b1f1f;color:#ffd0d0}
+    .sidebar{background:var(--panel);border:1px solid #1f2433;border-radius:10px;padding:10px;overflow:auto}
+    .legend-row{display:grid;grid-template-columns: 18px 1fr auto auto;gap:8px;align-items:center;padding:6px;border-radius:8px;border:1px solid #23283a;margin-bottom:6px;cursor:pointer}
+    .legend-row.selected{outline:2px solid var(--accent)}
+    .swatch{width:14px;height:14px;border-radius:3px;border:1px solid #0006}
+    .grid{display:grid;gap:8px}
+    .summary{margin-top:8px;font-size:12px;color:var(--muted)}
+    .canvas-wrap{position:relative;background:#0b0e16;border:1px solid #1f2433;border-radius:10px;overflow:hidden}
+    canvas{display:block;width:100%;height:100%}
+    .hud{position:absolute;top:8px;left:8px;background:#0b1020cc;padding:6px 8px;border-radius:8px;border:1px solid #20263b;font-size:12px;pointer-events:none}
+    .modal{position:fixed;inset:0;background:#000a;display:none;align-items:center;justify-content:center;z-index:50}
+    .dialog{width:min(1100px,92vw);height:min(720px,88vh);background:#0b0e16;border:1px solid #1f2433;border-radius:12px;display:grid;grid-template-rows:auto 1fr}
+    .dialog header{display:flex;gap:8px;align-items:center;padding:8px;background:#101425;border-bottom:1px solid #1f2433}
+    #map{height:100%;}
+    .color-bar button{width:24px;height:24px;border-radius:6px;border:1px solid #0006;padding:0}
+    .color-bar input[type="color"]{width:32px;height:24px;padding:0}
+    .autocomplete{position:relative}
+    .suggest{position:absolute;top:110%;left:0;right:0;background:#0b0e16;border:1px solid #1f2433;border-radius:8px;z-index:10;display:none;max-height:220px;overflow:auto}
+    .suggest div{padding:6px 8px;cursor:pointer}
+    .suggest div:hover{background:#121831}
+    .calib-bar{display:none;gap:6px;align-items:center;padding:6px 8px;background:#101425;border:1px solid #1f2433;border-radius:8px;margin-left:8px}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div class="toolbar">
+        <div class="group">
+          <button id="btn-path" class="toggle" title="Draw a path">Path</button>
+          <button id="btn-grid" class="toggle" title="Draw a grid polygon">Grid</button>
+          <button id="btn-exclude" class="toggle" title="Exclude polygon (remove points)">Exclude</button>
+          <button id="btn-undo" class="warn" title="Undo last action">Undo</button>
+          <button id="btn-redo" title="Redo last undo">Redo</button>
+          <button id="btn-delete" class="warn" title="Delete selected segment">Delete</button>
+          <button id="btn-finish" title="Finish current drawing / exclusion">Finish</button>
+        </div>
+        <div class="group">
+          <label>Spacing
+            <select id="spacing-select" title="Scan spacing (feet)">
+              <option>4</option><option selected>5</option><option>8</option><option>10</option><option>12</option><option>15</option><option>20</option>
+            </select>
+            ft
+          </label>
+        </div>
+        <div class="group color-bar">
+          <span>Colour</span>
+          <button data-color="var(--c1)" style="background:var(--c1)"></button>
+          <button data-color="var(--c2)" style="background:var(--c2)"></button>
+          <button data-color="var(--c3)" style="background:var(--c3)"></button>
+          <button data-color="var(--c4)" style="background:var(--c4)"></button>
+          <button data-color="var(--c5)" style="background:var(--c5)"></button>
+          <input id="color-picker" type="color" title="Custom" value="#60a5fa"/>
+        </div>
+        <div class="group">
+          <label id="perimeter-wrap" style="display:none"><input id="perimeter-toggle" type="checkbox" checked> Include Perimeter Points</label>
+        </div>
+        <div class="group">
+          <button id="btn-map" title="Open satellite map to capture background">Map</button>
+          <input id="upload" type="file" accept="image/*" title="Upload background image" />
+          <button id="btn-fit" title="Fit background to workspace">Fit</button>
+          <button id="btn-reset" title="Reset pan/zoom to origin">Reset</button>
+        </div>
+        <div class="group">
+          <button id="btn-calib" class="toggle" title="Calibrate scale">Calibrate</button>
+        </div>
+        <div class="group">
+          <label>Project <input id="proj-title" type="text" placeholder="Title used for export" style="width:260px"/></label>
+        </div>
+        <div class="group calib-bar" id="calib-bar">
+          <strong>Calibration:</strong>
+          <span>Click two points, enter feet, Apply.</span>
+          <label>Distance <input id="calib-feet" type="number" min="0.1" step="0.1" value="10" style="width:90px"/> ft</label>
+          <button id="calib-apply">Apply</button>
+          <button id="calib-cancel">Cancel</button>
+        </div>
+        <div class="group">
+          <label>Export as
+            <select id="export-format">
+              <option selected>JPEG</option>
+              <option>PDF</option>
+              <option>PNG</option>
+            </select>
+          </label>
+          <button id="btn-export" title="Export with legend & title">Export</button>
+        </div>
+        <div class="group">
+          <button id="btn-edit" class="toggle" title="Edit vertices / insert / delete">Edit</button>
+          <button id="btn-erase" class="toggle" title="Erase individual scan points (click)">Erase pts</button>
+        </div>
+        <div class="group">
+          <button id="btn-open" title="Open a saved project (.json)">Open</button>
+          <button id="btn-save" title="Save image & open next map">Save</button>
+        </div>
+        <div class="group">
+          <label>Time/pt
+            <input id="time-min" type="number" min="0" step="1" value="0" style="width:60px"/> min
+            <input id="time-sec" type="number" min="0" step="1" value="30" style="width:60px"/> sec
+          </label>
+        </div>
+        <div class="summary" id="status" style="margin-left:auto"></div>
+      </div>
+    </header>
+
+    <aside class="sidebar">
+      <h3 style="margin:6px 0 8px">Legend</h3>
+      <div id="legend" class="grid"></div>
+      <div class="summary" id="summary"></div>
+    </aside>
+
+    <main class="canvas-wrap">
+      <canvas id="canvas"></canvas>
+      <div id="hud" class="hud"></div>
+    </main>
+  </div>
+
+  <!-- Map Modal -->
+  <div id="mapModal" class="modal">
+    <div class="dialog">
+      <header>
+        <div class="autocomplete" style="flex:1">
+          <input id="addr" type="text" placeholder="Search address" style="width:100%" autocomplete="off"/>
+          <div id="suggest" class="suggest"></div>
+        </div>
+        <button id="goAddr">Go</button>
+        <button id="measureDist" title="Measure distance on map">Measure Dist</button>
+        <button id="measureArea" title="Measure area on map">Measure Area</button>
+        <button id="measureClear" title="Clear measurement">Clear</button>
+        <div id="measureReadout" style="min-width:160px;margin-left:8px;font-size:12px;color:#9aa3b2"></div>
+        <button id="captureMap">Capture & Insert</button>
+        <button id="closeMap">Close</button>
+        <div style="margin-left:auto;font-size:12px;color:#9aa3b2">Imagery © Esri, Maxar, Earthstar Geographics</div>
+      </header>
+      <div id="map"></div>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/leaflet-image/leaflet-image.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" crossorigin="anonymous"></script>
+  <script>
+  // ------------------------- Modes & State -------------------------
+  const Modes = Object.freeze({ NONE:'none', PATH:'path', GRID:'grid', EXCLUDE:'exclude', CALIB:'calib', EDIT:'edit', ERASE:'erase' });
+
+  /** @typedef {{x:number,y:number}} Pt */
+  /** @typedef {{id:string,type:'path'|'grid',spacingFt:number,color:string,scanPoints:Pt[]}} SegmentBase */
+  /** @typedef {SegmentBase & {type:'path', points:Pt[]}} PathSegment */
+  /** @typedef {SegmentBase & {type:'grid', polygon:Pt[], includePerimeter:boolean, masks?:Pt[]}} GridSegment */
+
+  const state = {
+    pixelsPerFoot: 1,
+    calibration: null, // {p1:Pt,p2:Pt,feet:number}
+    bgImage: null,
+    bgSize: {w:0,h:0},
+    segments: [],
+    selectedId: null,
+    activeMode: Modes.NONE,
+    view: {ox:0, oy:0, scale:1},
+    drawing: null,           // for PATH & GRID only
+    exclude: null,           // {pts:Pt[]}
+    calibDraft: null,        // {p1:Pt,p2:Pt|null}
+    calibHover: null,        // Pt | null (preview to cursor)
+    currentColor: getComputedStyle(document.documentElement).getPropertyValue('--c1').trim()
+  };
+
+  // History stacks for undo/redo
+  const undoStack = []; const redoStack = [];
+  const snapshot = ()=> JSON.parse(JSON.stringify({segments:state.segments, calibration:state.calibration, pixelsPerFoot:state.pixelsPerFoot, selectedId:state.selectedId}));
+  function restore(s){ state.segments=s.segments; state.calibration=s.calibration; state.pixelsPerFoot=s.pixelsPerFoot; state.selectedId=s.selectedId||null; renderLegend(); render(); }
+  function pushUndo(){ undoStack.push(snapshot()); redoStack.length=0; }
+
+  // ------------------------- DOM -------------------------
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  const statusEl = document.getElementById('status');
+  const legendEl = document.getElementById('legend');
+  const summaryEl = document.getElementById('summary');
+  const btnPath = document.getElementById('btn-path');
+  const btnGrid = document.getElementById('btn-grid');
+  const btnExclude = document.getElementById('btn-exclude');
+  const btnUndo = document.getElementById('btn-undo');
+  const btnRedo = document.getElementById('btn-redo');
+  const btnDelete = document.getElementById('btn-delete');
+  const btnFinish = document.getElementById('btn-finish');
+  const spacingSelect = document.getElementById('spacing-select');
+  const perimeterWrap = document.getElementById('perimeter-wrap');
+  const perimeterToggle = document.getElementById('perimeter-toggle');
+  const colorPicker = document.getElementById('color-picker');
+  const uploadInput = document.getElementById('upload');
+  const btnMap = document.getElementById('btn-map');
+  const btnFit = document.getElementById('btn-fit');
+  const btnReset = document.getElementById('btn-reset');
+  const btnCalib = document.getElementById('btn-calib');
+  const calibBar = document.getElementById('calib-bar');
+  const calibFeet = document.getElementById('calib-feet');
+  const calibApply = document.getElementById('calib-apply');
+  const calibCancel = document.getElementById('calib-cancel');
+  const projTitleEl = document.getElementById('proj-title');
+  const exportFormatEl = document.getElementById('export-format');
+  const btnEdit = document.getElementById('btn-edit');
+  const btnErase = document.getElementById('btn-erase');
+  const btnSave = document.getElementById('btn-save');
+  const btnOpen = document.getElementById('btn-open');
+  const btnExport = document.getElementById('btn-export');
+  const timeMin = document.getElementById('time-min');
+  const timeSec = document.getElementById('time-sec');
+
+  // color preset clicks
+  document.querySelectorAll('.color-bar button[data-color]').forEach(btn=>{ btn.addEventListener('click', ()=>{ const sel=getSelected(); if(sel){ pushUndo(); } state.currentColor = getComputedStyle(btn).backgroundColor; applyColorToSelected(); }); });
+  colorPicker.addEventListener('change', ()=>{ const sel=getSelected(); if(sel){ pushUndo(); } state.currentColor = colorPicker.value; applyColorToSelected(); });
+  function applyColorToSelected(){ const sel=getSelected(); if(sel){ sel.color=state.currentColor; renderLegend(); render(); } }
+
+  // ------------------------- Utilities -------------------------
+  const uid = () => Math.random().toString(36).slice(2,10);
+  const clone = o => JSON.parse(JSON.stringify(o));
+  const lerp = (a,b,t)=>a+(b-a)*t;
+  const dist2 = (a,b)=>{const dx=a.x-b.x, dy=a.y-b.y; return dx*dx+dy*dy};
+
+  function getEventWorld(e){ const rect = canvas.getBoundingClientRect(); const x = e.clientX - rect.left; const y = e.clientY - rect.top; return toWorld({x,y}); }
+  const toView = p => ({x:(p.x*state.view.scale)+state.view.ox, y:(p.y*state.view.scale)+state.view.oy});
+  const toWorld = p => ({x:(p.x-state.view.ox)/state.view.scale, y:(p.y-state.view.oy)/state.view.scale});
+
+  function pointInPolygon(pt, poly){ let inside=false; for(let i=0,j=poly.length-1;i<poly.length;j=i++){ const xi=poly[i].x, yi=poly[i].y, xj=poly[j].x, yj=poly[j].y; const intersect=((yi>pt.y)!=(yj>pt.y)) && (pt.x < (xj - xi)*(pt.y - yi)/(yj - yi + 1e-9) + xi); if(intersect) inside=!inside; } return inside; }
+  function feetToPixels(ft){ return ft * state.pixelsPerFoot; }
+
+  // ------------------------- Generation -------------------------
+  function generatePathPoints(vertices, spacingFt){ const spacingPx = feetToPixels(spacingFt); const scan=[]; for(let i=0;i<vertices.length-1;i++){ const a=vertices[i], b=vertices[i+1]; const segLen=Math.hypot(b.x-a.x, b.y-a.y); const count=Math.max(1, Math.floor(segLen/spacingPx)); for(let k=0;k<=count;k++){ const t=k/count; scan.push({x:lerp(a.x,b.x,t), y:lerp(a.y,b.y,t)}); } } return scan; }
+  function polygonFirstEdgeAngle(polygon){ if(polygon.length<2) return 0; const a=polygon[0], b=polygon[1]; return Math.atan2(b.y-a.y, b.x-a.x); }
+  function bbox(poly){ let minx=Infinity,miny=Infinity,maxx=-Infinity,maxy=-Infinity; for(const p of poly){ minx=Math.min(minx,p.x); miny=Math.min(miny,p.y); maxx=Math.max(maxx,p.x); maxy=Math.max(maxy,p.y);} return {minx,miny,maxx,maxy}; }
+  function rotatePoint(p, origin, cosA, sinA){ const dx=p.x-origin.x, dy=p.y-origin.y; return {x: origin.x + dx*cosA - dy*sinA, y: origin.y + dx*sinA + dy*cosA}; }
+  function generateGridPoints(polygon, spacingFt, includePerimeter){ const spacingPx = feetToPixels(spacingFt); const angle = polygonFirstEdgeAngle(polygon); const cosA = Math.cos(-angle), sinA = Math.sin(-angle); const origin = polygon[0]; const rotPoly = polygon.map(p=>rotatePoint(p, origin, cosA, sinA)); const bb = bbox(rotPoly); const points=[]; for(let y=bb.miny; y<=bb.maxy; y+=spacingPx){ for(let x=bb.minx; x<=bb.maxx; x+=spacingPx){ const test = {x,y}; if(pointInPolygon(test, rotPoly)) points.push(test); } } if(includePerimeter){ for(let i=0;i<rotPoly.length;i++){ const a=rotPoly[i], b=rotPoly[(i+1)%rotPoly.length]; const len=Math.hypot(b.x-a.x, b.y-a.y); const steps=Math.max(1, Math.floor(len/spacingPx)); for(let k=0;k<=steps;k++){ const t=k/steps; points.push({x:lerp(a.x,b.x,t), y:lerp(a.y,b.y,t)}); } } } const cosB = Math.cos(angle), sinB = Math.sin(angle); const rotatedBack = points.map(p=>rotatePoint(p, origin, cosB, sinB)); // de-dup nearly identical points (fixes doubled first row)
+    // Improved deduplication: merge points that are very close together using a small distance threshold.
+    // Without this, adjacent edges can produce duplicate scan points which inflate counts and timing.
+    const out = [];
+    const threshold = spacingPx * 0.3; // 30% of the spacing distance in pixels
+    rotatedBack.forEach((p) => {
+      let duplicate = false;
+      for (const existing of out) {
+        // If the new point is within the threshold of an existing point, treat it as a duplicate.
+        if (Math.hypot(existing.x - p.x, existing.y - p.y) < threshold) {
+          duplicate = true;
+          break;
+        }
+      }
+      if (!duplicate) {
+        out.push(p);
+      }
+    });
+    return out;
+  }
+  function regenerateSegment(seg){
+    if(seg.type==='path'){
+      seg.scanPoints = generatePathPoints(seg.points, seg.spacingFt);
+    } else {
+      seg.scanPoints = generateGridPoints(seg.polygon, seg.spacingFt, seg.includePerimeter);
+    }
+    if(seg.masks && seg.masks.length){
+      seg.scanPoints = seg.scanPoints.filter(pt=>{
+        for(const m of seg.masks){
+          const dx=pt.x-m.x, dy=pt.y-m.y;
+          if((dx*dx+dy*dy) < 36) return false; // ~6px radius mask
+        }
+        return true;
+      });
+    }
+  }
+
+  function applyExcludePolygon(poly){ for(const seg of state.segments){ seg.scanPoints = seg.scanPoints.filter(pt=>!pointInPolygon(pt, poly)); } }
+
+  // ------------------------- Rendering -------------------------
+  function clear(){ ctx.clearRect(0,0,canvas.width,canvas.height); }
+  function drawCircle(p, r, color){ const v=toView(p); ctx.beginPath(); ctx.arc(v.x,v.y,r*state.view.scale,0,Math.PI*2); ctx.fillStyle=color; ctx.fill(); }
+  function drawPolyline(pts, color, width=2, closed=false){ if(pts.length<2) return; ctx.beginPath(); const p0=toView(pts[0]); ctx.moveTo(p0.x,p0.y); for(let i=1;i<pts.length;i++){ const p=toView(pts[i]); ctx.lineTo(p.x,p.y);} if(closed){ ctx.closePath(); } ctx.lineWidth = width; ctx.strokeStyle=color; ctx.stroke(); }
+
+  function draw(){
+    clear();
+    if(state.bgImage){
+      const img = state.bgImage; const w = state.bgSize.w, h = state.bgSize.h;
+      const topLeft = toView({x:0,y:0}); const botRight = toView({x:w,y:h});
+      const drawW = botRight.x - topLeft.x; const drawH = botRight.y - topLeft.y;
+      ctx.drawImage(img, 0,0, img.naturalWidth, img.naturalHeight, topLeft.x, topLeft.y, drawW, drawH);
+    }
+
+    for(const seg of state.segments){ const selected = seg.id===state.selectedId; const color = seg.color; if(seg.type==='path'){ drawPolyline(seg.points, selected? '#ffffff' : color, selected?4:2, false); } else { drawPolyline(seg.polygon, selected? '#ffffff' : color, selected?4:2, true); } for(const pt of seg.scanPoints){ drawCircle(pt, 3, color); } }
+
+    if(state.drawing && state.drawing.pts.length){ const pts = state.drawing.pts; const isGrid = state.activeMode===Modes.GRID; drawPolyline(pts, '#6b7280', 1.5, false); if(isGrid && pts.length>2){ drawPolyline([...pts, pts[0]], '#374151', 1, true); } }
+
+    if(state.exclude && state.exclude.pts && state.exclude.pts.length){ drawPolyline([...state.exclude.pts, state.exclude.pts[0]], '#ff9aa2', 2, true); }
+
+    // persisted calibration
+    if(state.calibration){ const {p1,p2,feet}=state.calibration; drawPolyline([p1,p2], '#ff5555', 2, false); const mid = toView({x:(p1.x+p2.x)/2, y:(p1.y+p2.y)/2}); ctx.fillStyle='#ffcccc'; ctx.font='12px system-ui'; ctx.fillText(`${feet.toFixed(2)} ft`, mid.x+6, mid.y-6); }
+
+    // calibration preview (yellow) follows cursor until 2nd click
+    if(state.activeMode===Modes.CALIB && state.calibDraft && state.calibDraft.p1){ const p2 = state.calibDraft.p2 || state.calibHover; if(p2){ drawPolyline([state.calibDraft.p1, p2], '#ffcc00', 2, false); } }
+  }
+
+  function renderLegend(){
+    legendEl.innerHTML = '';
+    state.segments.forEach((seg, idx)=>{
+      const row = document.createElement('div'); row.className='legend-row'+(seg.id===state.selectedId?' selected':'');
+      const sw = document.createElement('div'); sw.className='swatch'; sw.style.background=seg.color; row.appendChild(sw);
+      const label = document.createElement('div');
+      const ppf = state.pixelsPerFoot||1; let extra='';
+      if(seg.type==='path' && seg.points.length>1){ let lenPx=0; for(let i=0;i<seg.points.length-1;i++){ const a=seg.points[i], b=seg.points[i+1]; lenPx += Math.hypot(b.x-a.x,b.y-a.y);} const ft=(lenPx/ppf); extra = ` • ${ft.toFixed(1)} ft`; }
+      if(seg.type==='grid' && seg.polygon.length>2){ let area2=0; const poly=seg.polygon; for(let i=0;i<poly.length;i++){ const j=(i+1)%poly.length; area2 += (poly[i].x*poly[j].y - poly[j].x*poly[i].y); } const sqft=Math.abs(area2)/2/(ppf*ppf); extra = ` • ${Math.round(sqft)} sqft`; }
+      label.textContent = `${seg.type==='path'?'Path':'Grid'} ${idx+1}${extra}`;
+      label.title = 'Double-click to calibrate from this segment (enter known ft or sqft)';
+      label.ondblclick = ()=> calibrateFromSegment(seg);
+      row.appendChild(label);
+      const sp = document.createElement('div'); sp.textContent = `${seg.spacingFt} ft`; sp.style.color='var(--muted)'; row.appendChild(sp);
+      const ct = document.createElement('div'); ct.textContent = `${seg.scanPoints.length}`; ct.title='scan-point count'; row.appendChild(ct);
+      row.onclick = ()=>{ setSelected(seg.id); };
+      legendEl.appendChild(row);
+    });
+
+    const total = state.segments.reduce((a,s)=>a+s.scanPoints.length,0);
+    const secPer = Math.max(0, ((parseFloat(timeMin?.value)||0)*60) + (parseFloat(timeSec?.value)||0));
+    const est = secPer>0 ? (()=>{ const totalSec = Math.round(total*secPer); const h=Math.floor(totalSec/3600); const m=Math.floor((totalSec%3600)/60); return `${h}h ${m}m`; })() : '—';
+    const rateTxt = secPer>0 ? ` at ${secPer<60?secPer+" sec/pt":(secPer/60).toFixed(2)+" min/pt"}` : '';
+    summaryEl.innerHTML = `Total points: <b>${total}</b><br/>Estimated time: <b>${est}</b>${rateTxt}`;
+  }
+  function calibrateFromSegment(seg){
+    const ppf = state.pixelsPerFoot||1;
+    if(seg.type==='path' && seg.points.length>1){ let lenPx=0; for(let i=0;i<seg.points.length-1;i++){ const a=seg.points[i], b=seg.points[i+1]; lenPx += Math.hypot(b.x-a.x,b.y-a.y);} const measuredFt=lenPx/ppf; const known = parseFloat(prompt(`Measured ~${measuredFt.toFixed(2)} ft. Enter known length in ft to recalibrate:`, measuredFt.toFixed(2))); if(known>0){ state.pixelsPerFoot = lenPx/known; state.segments.forEach(regenerateSegment); renderLegend(); render(); } }
+    if(seg.type==='grid' && seg.polygon.length>2){ let area2=0; const poly=seg.polygon; for(let i=0;i<poly.length;i++){ const j=(i+1)%poly.length; area2 += (poly[i].x*poly[j].y - poly[j].x*poly[i].y); } const measuredSqft = Math.abs(area2)/2/(ppf*ppf); const known = parseFloat(prompt(`Measured ~${Math.round(measuredSqft)} sqft. Enter known area in sqft to recalibrate:`, `${Math.round(measuredSqft)}`)); if(known>0){ const areaPx2 = Math.abs(area2)/2; state.pixelsPerFoot = Math.sqrt(areaPx2/known); state.segments.forEach(regenerateSegment); renderLegend(); render(); } }
+  }
+
+  function getSelected(){ return state.segments.find(s=>s.id===state.selectedId)||null; }
+  function setSelected(id){ state.selectedId=id; perimeterWrap.style.display = (getSelected()?.type==='grid') ? '' : 'none'; renderLegend(); render(); }
+  function addSegment(seg){ pushUndo(); regenerateSegment(seg); state.segments.push(seg); setSelected(seg.id); renderLegend(); render(); }
+
+  function finish(){
+    if(state.activeMode===Modes.PATH || state.activeMode===Modes.GRID){ finishDrawing(); return; }
+    if(state.activeMode===Modes.EXCLUDE && state.exclude && state.exclude.pts.length>2){ pushUndo(); applyExcludePolygon(state.exclude.pts); state.exclude=null; setMode(Modes.NONE); renderLegend(); render(); return; }
+  }
+
+  function finishDrawing(){
+    const pts = state.drawing?.pts || []; if(!pts.length) return;
+    const spacingFt = parseFloat(spacingSelect.value)||5; const color = state.currentColor;
+    if(state.activeMode===Modes.PATH && pts.length>1){ addSegment({id:uid(), type:'path', spacingFt, color, points:clone(pts), scanPoints:[]}); }
+    if(state.activeMode===Modes.GRID && pts.length>2){ addSegment({id:uid(), type:'grid', spacingFt, color, polygon:clone(pts), includePerimeter: perimeterToggle.checked, scanPoints:[]}); }
+    state.drawing=null; setMode(Modes.NONE);
+  }
+
+  function undo(){ if(undoStack.length){ const cur=snapshot(); const prev=undoStack.pop(); redoStack.push(cur); restore(prev); } }
+  function redo(){ if(redoStack.length){ const cur=snapshot(); const next=redoStack.pop(); undoStack.push(cur); restore(next); } }
+
+  function deleteSelected(){ const sel=getSelected(); if(!sel) return; pushUndo(); state.segments = state.segments.filter(s=>s.id!==sel.id); state.selectedId=null; renderLegend(); render(); }
+
+  function updateStatus(){ const sel = getSelected(); const scaleTxt = `${state.pixelsPerFoot.toFixed(2)} px/ft`; const titleTxt = projTitleEl.value?` • ${projTitleEl.value}`:''; statusEl.textContent = `Mode ${state.activeMode||'none'} • Spacing ${spacingSelect.value} ft • Scale ${scaleTxt}${titleTxt}` + (sel?` • Selected ${sel.type} (${sel.scanPoints.length} pts)`:''); }
+  function render(){ updateStatus(); draw(); }
+
+  // ------------------------- Pan/Zoom -------------------------
+  let isDragging=false; let dragStart=null; let editDragging=null;
+  canvas.addEventListener('mousedown', (e)=>{
+    const w = getEventWorld(e);
+    // ERASE individual scan points
+    if(state.activeMode===Modes.ERASE){
+      let best=null, bestD=1e9;
+      for(const seg of state.segments){
+        seg.scanPoints.forEach((p,idx)=>{
+          const v=toView(p); const d=Math.hypot((e.clientX-canvas.getBoundingClientRect().left)-v.x, (e.clientY-canvas.getBoundingClientRect().top)-v.y);
+          if(d<bestD){ bestD=d; best={seg,pt:p}; }
+        });
+      }
+      if(best && bestD<14){ pushUndo(); best.seg.masks = best.seg.masks||[]; if(e.shiftKey){ // restore nearest masked point instead
+          if(best.seg.masks.length){ let mi=-1, md=1e9; for(let i=0;i<best.seg.masks.length;i++){ const m=best.seg.masks[i]; const d=Math.hypot(best.pt.x-m.x, best.pt.y-m.y); if(d<md){ md=d; mi=i; } } if(mi>=0) best.seg.masks.splice(mi,1); }
+        } else {
+          best.seg.masks.push({x:best.pt.x,y:best.pt.y});
+        }
+        regenerateSegment(best.seg); renderLegend(); render();
+      }
+      return;
+    }
+
+    // EDIT vertices: drag nearest vertex, or Shift+click to insert on nearest edge
+    if(state.activeMode===Modes.EDIT){
+      let seg = getSelected();
+      if(!seg){ // pick nearest segment
+        let best=null, bestD=1e9; for(const s of state.segments){ if(s.type==='path'){ for(let i=0;i<s.points.length;i++){ const v=toView(s.points[i]); const d=Math.hypot((e.clientX-canvas.getBoundingClientRect().left)-v.x, (e.clientY-canvas.getBoundingClientRect().top)-v.y); if(d<bestD){bestD=d; best=s;} } } else { s.polygon.forEach(p=>{ const v=toView(p); const d=Math.hypot((e.clientX-canvas.getBoundingClientRect().left)-v.x, (e.clientY-canvas.getBoundingClientRect().top)-v.y); if(d<bestD){bestD=d; best=s;} }); } }
+        if(best) setSelected(best.id);
+        seg=getSelected();
+      }
+      if(!seg) return;
+      const verts = (seg.type==='path')? seg.points : seg.polygon;
+      // nearest vertex
+      let vi=-1, vd=1e9; for(let i=0;i<verts.length;i++){ const v=toView(verts[i]); const d=Math.hypot((e.clientX-canvas.getBoundingClientRect().left)-v.x, (e.clientY-canvas.getBoundingClientRect().top)-v.y); if(d<vd){ vd=d; vi=i; } }
+      // nearest edge projection
+      let ei=-1, ep=null, ed=1e9; for(let i=0;i<verts.length- (seg.type==='path'?1:0); i++){ const a=verts[i], b=verts[(i+1)%verts.length]; const A=toView(a), B=toView(b); const m={x:(e.clientX-canvas.getBoundingClientRect().left), y:(e.clientY-canvas.getBoundingClientRect().top)}; const ab={x:B.x-A.x,y:B.y-A.y}; const ab2=ab.x*ab.x+ab.y*ab.y; const t=Math.max(0, Math.min(1, ((m.x-A.x)*ab.x+(m.y-A.y)*ab.y)/(ab2||1))); const proj={x:A.x+ab.x*t,y:A.y+ab.y*t}; const d=Math.hypot(m.x-proj.x,m.y-proj.y); if(d<ed){ ed=d; ei=i; ep=toWorld(proj);} }
+      if(e.shiftKey && ep && ed<14){ // insert vertex
+        pushUndo(); verts.splice(ei+1,0,ep); regenerateSegment(seg); renderLegend(); render(); return; }
+      if(vi>=0 && vd<14){ pushUndo(); editDragging={seg, index:vi}; return; }
+      return;
+    }
+
+    // Drawing / Exclude / Calibrate / Pan
+    if(state.activeMode===Modes.PATH || state.activeMode===Modes.GRID){ state.drawing = state.drawing || {pts:[]}; state.drawing.pts.push(w); render(); return; }
+    if(state.activeMode===Modes.EXCLUDE){ state.exclude = state.exclude || {pts:[]}; state.exclude.pts.push(w); render(); return; }
+    if(state.activeMode===Modes.CALIB){
+      if(!state.calibDraft){ state.calibDraft={p1:w,p2:null}; state.calibHover=null; }
+      else if(state.calibDraft && state.calibDraft.p1 && !state.calibDraft.p2){ state.calibDraft.p2=w; state.calibHover=null; calibFeet.focus(); }
+      render(); return;
+    }
+    isDragging=true; dragStart={x:e.clientX - state.view.ox, y:e.clientY - state.view.oy};
+  });
+
+  canvas.addEventListener('mousemove', (e)=>{
+    if(state.activeMode===Modes.CALIB && state.calibDraft && state.calibDraft.p1 && !state.calibDraft.p2){ state.calibHover=getEventWorld(e); render(); return; }
+    if(editDragging){ const w = getEventWorld(e); const seg = editDragging.seg; const verts = (seg.type==='path')? seg.points : seg.polygon; verts[editDragging.index] = w; regenerateSegment(seg); renderLegend(); render(); return; }
+    if(isDragging){ state.view.ox = e.clientX - dragStart.x; state.view.oy = e.clientY - dragStart.y; render(); return; }
+  });
+  window.addEventListener('mouseup', ()=>{ isDragging=false; editDragging=null; });
+
+  canvas.addEventListener('wheel', (e)=>{
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const mouse = {x:e.clientX - rect.left, y:e.clientY - rect.top};
+    const before = toWorld(mouse);
+    const delta = -Math.sign(e.deltaY) * 0.12;
+    const newScale = Math.min(6, Math.max(0.2, state.view.scale*(1+delta)));
+    state.view.scale = newScale;
+    state.view.ox = mouse.x - before.x * newScale;
+    state.view.oy = mouse.y - before.y * newScale;
+    render();
+  }, {passive:false});
+
+  // click-to-select when idle
+  canvas.addEventListener('click', (e)=>{
+    if(state.activeMode!==Modes.NONE) return;
+    const w = getEventWorld(e); let best=null, bestD=1e9;
+    for(const seg of state.segments){
+      if(seg.type==='path'){
+        for(let i=0;i<seg.points.length-1;i++){
+          const a=seg.points[i], b=seg.points[i+1];
+          const t = Math.max(0, Math.min(1, ((w.x-a.x)*(b.x-a.x)+(w.y-a.y)*(b.y-a.y)) / (dist2(a,b)+1e-9)));
+          const proj = {x:a.x+(b.x-a.x)*t, y:a.y+(b.y-a.y)*t};
+          const d = Math.hypot(w.x-proj.x, w.y-proj.y);
+          if(d<bestD){ bestD=d; best=seg; }
+        }
+      } else {
+        if(pointInPolygon(w, seg.polygon)) { best=seg; bestD=0; }
+      }
+    }
+    if(best && bestD<12){ setSelected(best.id); }
+  });
+
+  // keys
+  window.addEventListener('keydown', (e)=>{
+    if((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==='z'){ e.preventDefault(); undo(); }
+    if((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==='y'){ e.preventDefault(); redo(); }
+    if((e.ctrlKey||e.metaKey) && e.shiftKey && e.key.toLowerCase()==='z'){ e.preventDefault(); redo(); }
+    if(e.key==='Delete' || e.key==='Backspace'){ const active= document.activeElement; const editingInput = active && (active.tagName==='INPUT' || active.tagName==='TEXTAREA'); if(!editingInput){ e.preventDefault(); deleteSelected(); } }
+    if(e.key==='Enter'){
+      if(state.activeMode===Modes.CALIB && state.calibDraft && state.calibDraft.p1 && state.calibDraft.p2){ calibApply.click(); return; }
+      e.preventDefault(); finish();
+    }
+    if(e.key==='Escape'){ state.drawing=null; state.exclude=null; state.calibHover=null; if(state.activeMode===Modes.CALIB){ state.calibDraft=null; } setMode(Modes.NONE); render(); }
+  });
+
+  // ------------------------- Controls -------------------------
+  function setMode(mode){ state.activeMode = mode; document.querySelectorAll('.toggle').forEach(b=>b.classList.remove('active')); ({[Modes.PATH]:btnPath,[Modes.GRID]:btnGrid,[Modes.EXCLUDE]:btnExclude,[Modes.CALIB]:btnCalib,[Modes.EDIT]:btnEdit,[Modes.ERASE]:btnErase})[mode]?.classList.add('active'); calibBar.style.display = (mode===Modes.CALIB)?'flex':'none'; perimeterWrap.style.display = (mode===Modes.GRID || getSelected()?.type==='grid') ? '' : 'none'; updateStatus(); render(); }
+  btnPath.onclick = ()=> setMode(Modes.PATH);
+  btnGrid.onclick = ()=> setMode(Modes.GRID);
+  btnExclude.onclick = ()=> { state.exclude=null; setMode(Modes.EXCLUDE); };
+  btnUndo.onclick = ()=> undo();
+  btnRedo.onclick = ()=> redo();
+  btnDelete.onclick = ()=> deleteSelected();
+  btnFinish.onclick = ()=> finish();
+  if(btnSave) btnSave.onclick = ()=> { exportDoc(exportFormatEl.value); openMap(); };
+  if(btnOpen) btnOpen.onclick = ()=> openProject();
+  if(btnExport) btnExport.onclick = ()=> { exportDoc(exportFormatEl.value); };
+  if(btnEdit) btnEdit.onclick = ()=> setMode(Modes.EDIT);
+  if(btnErase) btnErase.onclick = ()=> setMode(Modes.ERASE);
+  if(timeMin) timeMin.addEventListener('input', ()=> renderLegend());
+  if(timeSec) timeSec.addEventListener('input', ()=> renderLegend());
+  spacingSelect.onchange = ()=>{ const sel=getSelected(); if(sel){ pushUndo(); sel.spacingFt=parseFloat(spacingSelect.value)||5; regenerateSegment(sel); renderLegend(); render(); } };
+  perimeterToggle.onchange = ()=>{ const sel=getSelected(); if(sel && sel.type==='grid'){ pushUndo(); sel.includePerimeter=perimeterToggle.checked; regenerateSegment(sel); renderLegend(); render(); } };
+  btnFit.onclick = ()=> fitImage();
+  btnReset.onclick = ()=> { state.view.scale=1; state.view.ox=0; state.view.oy=0; render(); };
+  btnCalib.onclick = ()=> { setMode(Modes.CALIB); state.calibDraft=null; state.calibHover=null; };
+  calibApply.onclick = ()=>{
+    if(state.calibDraft && state.calibDraft.p1 && state.calibDraft.p2){
+      pushUndo();
+      const feet = parseFloat(calibFeet.value) || 10;
+      const px = Math.hypot((state.calibDraft.p2.x - state.calibDraft.p1.x), (state.calibDraft.p2.y - state.calibDraft.p1.y));
+      // update pixels per foot based on calibration
+      state.pixelsPerFoot = px / feet;
+      state.calibration = { p1: state.calibDraft.p1, p2: state.calibDraft.p2, feet };
+      state.calibDraft = null;
+      state.calibHover = null;
+      // regenerate scan points for all segments to respect new scale
+      state.segments.forEach(s => regenerateSegment(s));
+      renderLegend();
+      setMode(Modes.NONE);
+      render();
+    }
+  };
+  calibCancel.onclick = ()=>{ state.calibDraft=null; state.calibHover=null; setMode(Modes.NONE); render(); };
+
+  // ------------------------- Image upload & fit -------------------------
+  uploadInput.addEventListener('change', ()=>{ const file = uploadInput.files?.[0]; if(!file) return; const img = new Image(); img.onload = ()=>{ state.bgImage=img; state.bgSize={w:img.naturalWidth,h:img.naturalHeight}; fitImage(); render(); }; img.src = URL.createObjectURL(file); });
+  function fitImage(){ if(!state.bgImage) return; const rect = canvas.getBoundingClientRect(); const cssW = rect.width, cssH = rect.height; const s = Math.min(cssW/state.bgSize.w, cssH/state.bgSize.h); state.view.scale = s; state.view.ox = (cssW - state.bgSize.w*s)/2; state.view.oy = (cssH - state.bgSize.h*s)/2; render(); }
+
+  // ------------------------- Map Modal, Autocomplete & Capture -------------------------
+  const modal = document.getElementById('mapModal');
+  const addr = document.getElementById('addr');
+  const suggest = document.getElementById('suggest');
+  const goAddr = document.getElementById('goAddr');
+  const captureMap = document.getElementById('captureMap');
+  const closeMap = document.getElementById('closeMap');
+  const measureDistBtn = document.getElementById('measureDist');
+  const measureAreaBtn = document.getElementById('measureArea');
+  const measureClearBtn = document.getElementById('measureClear');
+  const measureReadout = document.getElementById('measureReadout');
+  let map, esriLayer, measureMode=null, measureLatLngs=[], measureLayer=null, mapClickBound=false;
+
+  function openMap(){ modal.style.display='flex'; setTimeout(()=>{ if(!map){ map = L.map('map'); esriLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { attribution: 'Imagery © Esri', crossOrigin: true }); esriLayer.addTo(map); map.setView([34.0007,-81.0348], 18); if(!mapClickBound){ map.on('click', (e)=>{ if(!measureMode) return; measureLatLngs.push(e.latlng); updateMeasure(); }); mapClickBound=true; } } else { map.invalidateSize(); } },0); }
+  btnMap.onclick = openMap; closeMap.onclick = ()=> { modal.style.display='none'; suggest.style.display='none'; clearMeasure(); };
+
+  function metersPerPixel(lat, zoom){ return 156543.03392 * Math.cos(lat*Math.PI/180) / Math.pow(2, zoom); }
+
+  async function geocode(q){ const url = `https://nominatim.openstreetmap.org/search?format=json&limit=5&q=${encodeURIComponent(q)}`; const res = await fetch(url, {headers:{'Accept':'application/json'}}); return await res.json(); }
+
+  let acTimer=null; addr.addEventListener('input', ()=>{ clearTimeout(acTimer); const q=addr.value.trim(); if(!q){ suggest.style.display='none'; suggest.innerHTML=''; return; } acTimer=setTimeout(async()=>{ const results = await geocode(q); suggest.innerHTML=''; results.forEach(r=>{ const d=document.createElement('div'); d.textContent=r.display_name; d.onclick=()=>{ addr.value=r.display_name; suggest.style.display='none'; map.setView([parseFloat(r.lat), parseFloat(r.lon)], 19); }; suggest.appendChild(d); }); suggest.style.display = results.length?'block':'none'; }, 250); });
+  goAddr.onclick = async ()=>{ const q=addr.value.trim(); if(!q) return; const results = await geocode(q); if(results && results[0]){ const {lat,lon} = results[0]; map.setView([parseFloat(lat), parseFloat(lon)], 19); } };
+
+  measureDistBtn.onclick = ()=>{ setMeasureMode('dist'); };
+  measureAreaBtn.onclick = ()=>{ setMeasureMode('area'); };
+  measureClearBtn.onclick = ()=>{ clearMeasure(); };
+
+  function setMeasureMode(mode){
+    measureMode = mode; measureLatLngs=[]; updateMeasure();
+    if(measureLayer){ map.removeLayer(measureLayer); measureLayer=null; }
+    if(map){
+      map.dragging.disable();
+      map.doubleClickZoom.disable();
+      map.scrollWheelZoom.disable();
+      map.boxZoom.disable();
+      map.keyboard.disable();
+      map.getContainer().style.cursor = 'crosshair';
+    }
+  }
+  function clearMeasure(){
+    measureMode = null;
+    measureLatLngs = [];
+    updateMeasure();
+    if(measureLayer){ map.removeLayer(measureLayer); measureLayer = null; }
+    if(map){
+      map.dragging.enable();
+      map.doubleClickZoom.enable();
+      map.scrollWheelZoom.enable();
+      map.boxZoom.enable();
+      map.keyboard.enable();
+      map.getContainer().style.cursor = '';
+    }
+  }
+
+  // ------------------------- Measurement Overlay -------------------------
+  // Compute and render measurement overlays on the map. Supports distance and area modes.
+  function updateMeasure(){
+    // Remove any existing measurement layer
+    if(measureLayer && map){ map.removeLayer(measureLayer); measureLayer = null; }
+    // Reset readout
+    measureReadout.textContent = '';
+    if(!map || !measureMode || measureLatLngs.length===0) return;
+    if(measureMode === 'dist' && measureLatLngs.length>1){
+      // draw polyline and compute total distance in feet
+      const line = L.polyline(measureLatLngs, {color:'#00b0ff', weight:3});
+      line.addTo(map);
+      measureLayer = line;
+      let meters = 0;
+      for(let i=0;i<measureLatLngs.length-1;i++){
+        meters += map.distance(measureLatLngs[i], measureLatLngs[i+1]);
+      }
+      const feet = meters * 3.28084;
+      measureReadout.textContent = `${feet.toFixed(1)} ft`;
+    } else if(measureMode === 'area' && measureLatLngs.length>2){
+      // close polygon and compute area in sqft
+      const polygon = L.polygon(measureLatLngs, {color:'#00b0ff', weight:2, fillColor:'#00b0ff44'});
+      polygon.addTo(map);
+      measureLayer = polygon;
+      // compute geodesic area (square meters)
+      const areaMeters = L.GeometryUtil.geodesicArea(polygon.getLatLngs()[0]);
+      const sqft = areaMeters * 10.7639;
+      measureReadout.textContent = `${sqft.toFixed(0)} sqft`;
+    }
+  }
+
+  // ------------------------- Capture Map & Insert -------------------------
+  // Capture the Leaflet map and insert it as the background. Also convert any measurement into a calibration draft.
+  captureMap.addEventListener('click', ()=>{
+    if(!map) return;
+    // Use leaflet-image plugin to render the map into a canvas
+    leafletImage(map, function(err, mapCanvas) {
+      if(err) { console.error(err); return; }
+      // Convert to image object
+      const img = new Image();
+      img.onload = ()=>{
+        state.bgImage = img;
+        state.bgSize = {w: img.width, h: img.height};
+        // Insert measured line as calibration draft if available
+        if(measureLatLngs.length>1){
+          // convert lat/lngs to pixel coords relative to map container
+          const pts = measureLatLngs.map(ll=> map.latLngToContainerPoint(ll));
+          const worldPts = pts.map(p=> ({x:p.x, y:p.y}));
+          // If distance mode, set calibration draft to first and last points
+          if(measureMode === 'dist'){
+            // compute measured distance in feet
+            let meters = 0;
+            for(let i=0;i<measureLatLngs.length-1;i++){
+              meters += map.distance(measureLatLngs[i], measureLatLngs[i+1]);
+            }
+            const feet = meters * 3.28084;
+            // set calibration draft and populate feet
+            state.calibDraft = {p1: worldPts[0], p2: worldPts[worldPts.length-1]};
+            calibFeet.value = feet.toFixed(2);
+            setMode(Modes.CALIB);
+            render();
+          } else if(measureMode === 'area' && worldPts.length>2){
+            // For area measurement, estimate area in sqft and set calibration draft using polygon diagonal
+            const areaMeters = L.GeometryUtil.geodesicArea(measureLatLngs);
+            const sqft = areaMeters * 10.7639;
+            // use first two points as calibration line and feet equal to sqrt area
+            const diagFt = Math.sqrt(sqft);
+            state.calibDraft = {p1: worldPts[0], p2: worldPts[1]};
+            calibFeet.value = diagFt.toFixed(2);
+            setMode(Modes.CALIB);
+            render();
+          }
+        }
+        // Fit image to workspace and render
+        fitImage();
+        render();
+        // Clear measurement and close modal
+        clearMeasure();
+        modal.style.display='none';
+        suggest.style.display='none';
+      };
+      img.src = mapCanvas.toDataURL();
+    });
+  });
+
+  // ------------------------- Export Function -------------------------
+  // Export the current drawing with optional legend and title
+  function exportDoc(format){
+    // Ensure latest render
+    render();
+    // Compute dimensions
+    const mainW = canvas.width;
+    const mainH = canvas.height;
+    const headerHeight = 40;
+    const rowHeight = 20;
+    const summaryLineHeight = 18;
+    const legendRows = state.segments.length;
+    // Overlay dimensions: slightly wider to accommodate longer labels
+    const overlayWidth = 260;
+    // Height accounts for a header row labelled 'Legend', all segment rows and summary lines
+    const overlayHeight = (legendRows * rowHeight) + (2 * summaryLineHeight) + 42;
+    const outHeight = headerHeight + Math.max(mainH, overlayHeight + 20);
+    const scaleFactor = window.devicePixelRatio || 1;
+    const expCanvas = document.createElement('canvas');
+    expCanvas.width = mainW * scaleFactor;
+    expCanvas.height = outHeight * scaleFactor;
+    const ectx = expCanvas.getContext('2d');
+    ectx.scale(scaleFactor, scaleFactor);
+    // Fill background
+    ectx.fillStyle = getComputedStyle(document.body).backgroundColor || '#0f1115';
+    ectx.fillRect(0, 0, mainW, outHeight);
+    // Draw title
+    const title = projTitleEl.value || '';
+    if(title){
+      ectx.fillStyle = '#ffffff';
+      ectx.font = '18px system-ui';
+      ectx.fillText(title, 10, 25);
+    }
+    // Draw main canvas
+    ectx.drawImage(canvas, 0, headerHeight);
+    // Draw legend overlay
+    const ox = mainW - overlayWidth - 10;
+    const oy = headerHeight + 10;
+    // semi-transparent panel
+    ectx.fillStyle = 'rgba(15,17,29,0.8)';
+    ectx.fillRect(ox, oy, overlayWidth, overlayHeight);
+    // Header for legend
+    ectx.fillStyle = '#ffffff';
+    ectx.font = '16px system-ui';
+    ectx.fillText('Legend', ox + 8, oy + 18);
+    // Start y-position for legend rows after header
+    let ly = oy + 28;
+    state.segments.forEach((seg, idx) => {
+      // swatch
+      ectx.fillStyle = seg.color;
+      ectx.fillRect(ox + 8, ly - 6, 10, 10);
+      // label
+      ectx.fillStyle = '#ffffff';
+      ectx.font = '14px system-ui';
+      let extra = '';
+      if(seg.type === 'path' && seg.points.length > 1){
+        let lenPx = 0;
+        for(let i=0;i<seg.points.length-1;i++){
+          const a = seg.points[i], b = seg.points[i+1];
+          lenPx += Math.hypot(b.x - a.x, b.y - a.y);
+        }
+        const ft = lenPx / (state.pixelsPerFoot || 1);
+        extra = ` • ${ft.toFixed(1)} ft`;
+      }
+      if(seg.type === 'grid' && seg.polygon.length > 2){
+        const sqft = seg.scanPoints.length * seg.spacingFt * seg.spacingFt;
+        extra = ` • ${Math.round(sqft)} sqft`;
+      }
+      const label = `${seg.type === 'path' ? 'Path' : 'Grid'} ${idx + 1}${extra}`;
+      ectx.fillText(label, ox + 24, ly + 2);
+      // spacing and count
+      ectx.fillStyle = '#9aa3b2';
+      ectx.fillText(`${seg.spacingFt} ft`, ox + overlayWidth - 70, ly + 2);
+      ectx.fillText(`${seg.scanPoints.length}`, ox + overlayWidth - 25, ly + 2);
+      ly += rowHeight;
+    });
+    // Summary
+    ly += 4;
+    const totalPts = state.segments.reduce((sum, s) => sum + (s.scanPoints ? s.scanPoints.length : 0), 0);
+    const secPer = ((parseFloat(timeMin?.value)||0)*60) + (parseFloat(timeSec?.value)||0);
+    let estTimeStr = '—';
+    let rateTxt = '';
+    if(secPer > 0){
+      const totalSec = Math.round(totalPts * secPer);
+      const h = Math.floor(totalSec / 3600);
+      const m = Math.floor((totalSec % 3600) / 60);
+      estTimeStr = `${h}h ${m}m`;
+      rateTxt = secPer < 60 ? `${secPer} sec/pt` : `${(secPer/60).toFixed(2)} min/pt`;
+    }
+    ectx.fillStyle = '#9aa3b2';
+    ectx.font = '14px system-ui';
+    ectx.fillText(`Total points:`, ox + 8, ly + 2);
+    ectx.fillStyle = '#ffffff';
+    ectx.fillText(`${totalPts}`, ox + 110, ly + 2);
+    ly += summaryLineHeight;
+    ectx.fillStyle = '#9aa3b2';
+    ectx.fillText(`Estimated time:`, ox + 8, ly + 2);
+    ectx.fillStyle = '#ffffff';
+    ectx.fillText(`${estTimeStr}`, ox + 110, ly + 2);
+    if(rateTxt){
+      ectx.fillStyle = '#9aa3b2';
+      const estWidth = ectx.measureText(estTimeStr).width;
+      ectx.fillText(`(${rateTxt})`, ox + 110 + estWidth + 4, ly + 2);
+    }
+    // Save file
+    const baseName = (projTitleEl.value || 'Measurement').replace(/[^a-z0-9]/gi,'_').substring(0,40);
+    if(format === 'PDF'){
+      const dataURL = expCanvas.toDataURL('image/png');
+      const { jsPDF } = window.jspdf;
+      const pdf = new jsPDF({orientation:'landscape', unit:'px', format:[expCanvas.width/scaleFactor, expCanvas.height/scaleFactor]});
+      pdf.addImage(dataURL, 'PNG', 0, 0, expCanvas.width/scaleFactor, expCanvas.height/scaleFactor);
+      pdf.save(`${baseName}.pdf`);
+    } else {
+      const mime = format === 'JPEG' ? 'image/jpeg' : 'image/png';
+      const dataURL = expCanvas.toDataURL(mime);
+      const link = document.createElement('a');
+      link.href = dataURL;
+      link.download = `${baseName}.${format.toLowerCase()}`;
+      link.click();
+    }
+  }
+
+  // ------------------------- Project Open Function -------------------------
+  // Load a previously saved JSON project and restore state
+  function openProject(){
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json,application/json';
+    input.onchange = ()=>{
+      const file = input.files?.[0];
+      if(!file) return;
+      const reader = new FileReader();
+      reader.onload = (e)=>{
+        try{
+          const data = JSON.parse(e.target.result);
+          if(data && Array.isArray(data.segments)){
+            pushUndo();
+            state.segments = data.segments;
+            state.pixelsPerFoot = data.pixelsPerFoot || 1;
+            state.bgImage = null;
+            state.calibration = data.calibration || null;
+            // regenerate scan points
+            state.segments.forEach(regenerateSegment);
+            renderLegend();
+            render();
+          }
+        }catch(err){ console.error(err); }
+      };
+      reader.readAsText(file);
+    };
+    input.click();
+  }
+
+  // ------------------------- Resize Canvas -------------------------
+  // Ensure the canvas matches the container size
+  function resizeCanvas(){
+    const rect = canvas.getBoundingClientRect();
+    // Set width/height attributes (not just CSS) for crisp rendering
+    canvas.width = rect.width;
+    canvas.height = rect.height;
+    // Refit background image if any
+    if(state.bgImage){
+      fitImage();
+    }
+    render();
+  }
+  resizeCanvas();
+  window.addEventListener('resize', resizeCanvas);
+
+</script>
+</body>
+</html>
